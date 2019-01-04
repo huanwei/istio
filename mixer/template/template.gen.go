@@ -95,6 +95,12 @@ func (w *wrapperAttr) Get(name string) (value interface{}, found bool) {
 	return w.get(name)
 }
 
+// Contains returns true if key is present.
+func (w *wrapperAttr) Contains(key string) (found bool) {
+	_, found = w.get(key)
+	return found
+}
+
 // Names returns the names of all the attributes known to this bag.
 func (w *wrapperAttr) Names() []string {
 	return w.names()
@@ -847,7 +853,7 @@ var (
 			},
 
 			// DispatchCheck dispatches the instance to the handler.
-			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}) (adapter.CheckResult, error) {
+			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}, out *attribute.MutableBag, outPrefix string) (adapter.CheckResult, error) {
 
 				// Convert the instance from the generic interface{}, to its specialized type.
 				instance := inst.(*apikey.Instance)
@@ -1075,7 +1081,7 @@ var (
 			},
 
 			// DispatchCheck dispatches the instance to the handler.
-			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}) (adapter.CheckResult, error) {
+			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}, out *attribute.MutableBag, outPrefix string) (adapter.CheckResult, error) {
 
 				// Convert the instance from the generic interface{}, to its specialized type.
 				instance := inst.(*authorization.Instance)
@@ -1175,7 +1181,7 @@ var (
 			},
 
 			// DispatchCheck dispatches the instance to the handler.
-			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}) (adapter.CheckResult, error) {
+			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}, out *attribute.MutableBag, outPrefix string) (adapter.CheckResult, error) {
 
 				// Convert the instance from the generic interface{}, to its specialized type.
 				instance := inst.(*checknothing.Instance)
@@ -1489,7 +1495,7 @@ var (
 			},
 
 			// DispatchCheck dispatches the instance to the handler.
-			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}) (adapter.CheckResult, error) {
+			DispatchCheck: func(ctx context.Context, handler adapter.Handler, inst interface{}, out *attribute.MutableBag, outPrefix string) (adapter.CheckResult, error) {
 
 				// Convert the instance from the generic interface{}, to its specialized type.
 				instance := inst.(*listentry.Instance)

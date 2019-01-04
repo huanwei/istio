@@ -56,7 +56,7 @@ func convertPort(port int, name string) *model.Port {
 }
 
 func convertService(endpoints []*api.CatalogService) *model.Service {
-	name, externalName := "", ""
+	name := ""
 
 	meshExternal := false
 	resolution := model.ClientSideLB
@@ -65,7 +65,7 @@ func convertService(endpoints []*api.CatalogService) *model.Service {
 	for _, endpoint := range endpoints {
 		name = endpoint.ServiceName
 
-		port := convertPort(endpoint.ServicePort, endpoint.NodeMeta[protocolTagName])
+		port := convertPort(endpoint.ServicePort, endpoint.ServiceMeta[protocolTagName])
 
 		if svcPort, exists := ports[port.Port]; exists && svcPort.Protocol != port.Protocol {
 			log.Warnf("Service %v has two instances on same port %v but different protocols (%v, %v)",
@@ -76,8 +76,7 @@ func convertService(endpoints []*api.CatalogService) *model.Service {
 
 		// TODO This will not work if service is a mix of external and local services
 		// or if a service has more than one external name
-		if endpoint.NodeMeta[externalTagName] != "" {
-			externalName = endpoint.NodeMeta[externalTagName]
+		if endpoint.ServiceMeta[externalTagName] != "" {
 			meshExternal = true
 			resolution = model.Passthrough
 		}
@@ -93,7 +92,6 @@ func convertService(endpoints []*api.CatalogService) *model.Service {
 		Hostname:     hostname,
 		Address:      "0.0.0.0",
 		Ports:        svcPorts,
-		ExternalName: model.Hostname(externalName),
 		MeshExternal: meshExternal,
 		Resolution:   resolution,
 		Attributes: model.ServiceAttributes{
@@ -107,7 +105,7 @@ func convertService(endpoints []*api.CatalogService) *model.Service {
 
 func convertInstance(instance *api.CatalogService) *model.ServiceInstance {
 	labels := convertLabels(instance.ServiceTags)
-	port := convertPort(instance.ServicePort, instance.NodeMeta[protocolTagName])
+	port := convertPort(instance.ServicePort, instance.ServiceMeta[protocolTagName])
 
 	addr := instance.ServiceAddress
 	if addr == "" {
@@ -116,7 +114,7 @@ func convertInstance(instance *api.CatalogService) *model.ServiceInstance {
 
 	meshExternal := false
 	resolution := model.ClientSideLB
-	externalName := instance.NodeMeta[externalTagName]
+	externalName := instance.ServiceMeta[externalTagName]
 	if externalName != "" {
 		meshExternal = true
 		resolution = model.DNSLB
@@ -128,14 +126,12 @@ func convertInstance(instance *api.CatalogService) *model.ServiceInstance {
 			Address:     addr,
 			Port:        instance.ServicePort,
 			ServicePort: port,
+			Locality:    instance.Datacenter,
 		},
-		AvailabilityZone: instance.Datacenter,
 		Service: &model.Service{
-			Hostname: hostname,
-			Address:  instance.ServiceAddress,
-			Ports:    model.PortList{port},
-			// TODO ExternalName come from metadata?
-			ExternalName: model.Hostname(externalName),
+			Hostname:     hostname,
+			Address:      instance.ServiceAddress,
+			Ports:        model.PortList{port},
 			MeshExternal: meshExternal,
 			Resolution:   resolution,
 			Attributes: model.ServiceAttributes{

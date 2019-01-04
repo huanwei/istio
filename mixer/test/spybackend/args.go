@@ -21,10 +21,15 @@ import (
 	"istio.io/istio/mixer/template/listentry"
 	"istio.io/istio/mixer/template/metric"
 	"istio.io/istio/mixer/template/quota"
+	apaTmpl "istio.io/istio/mixer/test/spyAdapter/template/apa"
+	checkTmpl "istio.io/istio/mixer/test/spyAdapter/template/check"
+	checkoutputTmpl "istio.io/istio/mixer/test/spyAdapter/template/checkoutput"
+	quotaTmpl "istio.io/istio/mixer/test/spyAdapter/template/quota"
+	reportTmpl "istio.io/istio/mixer/test/spyAdapter/template/report"
 )
 
 type (
-	// Args specify captured requests and programmed behaviour
+	// Args specify captured requests and programmed behavior
 	Args struct {
 		// manipulate the behavior of the backend.
 		Behavior *Behavior
@@ -33,7 +38,7 @@ type (
 		Requests *Requests
 	}
 
-	// Behavior specifies programmed behaviour
+	// Behavior specifies programmed behavior
 	Behavior struct {
 		ValidateResponse *adptModel.ValidateResponse
 		ValidateError    error
@@ -55,6 +60,23 @@ type (
 		// quota IBP
 		HandleQuotaResult *adptModel.QuotaResult
 		HandleQuotaError  error
+
+		// sample quota IBP
+		HandleSampleQuotaResult *adptModel.QuotaResult
+		HandleSampleQuotaError  error
+
+		// sample check IBP
+		HandleSampleCheckResult *adptModel.CheckResult
+		HandleSampleCheckError  error
+		HandleCheckOutput       *checkoutputTmpl.OutputMsg
+
+		// sample report IBP
+		HandleSampleReportResult *adptModel.ReportResult
+		HandleSampleReportError  error
+
+		// sample APA IBP
+		HandleSampleApaResult *apaTmpl.OutputMsg
+		HandleSampleApaError  error
 	}
 
 	// Requests record captured requests by the spy
@@ -73,6 +95,14 @@ type (
 
 		quotaLock          sync.RWMutex
 		HandleQuotaRequest []*quota.HandleQuotaRequest
+
+		HandleSampleCheckRequest []*checkTmpl.HandleSampleCheckRequest
+
+		HandleSampleQuotaRequest []*quotaTmpl.HandleSampleQuotaRequest
+
+		HandleSampleReportRequest []*reportTmpl.HandleSampleReportRequest
+
+		HandleSampleApaRequest []*apaTmpl.HandleSampleApaRequest
 	}
 )
 

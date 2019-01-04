@@ -19,7 +19,7 @@ import (
 
 	"istio.io/api/mixer/adapter/model/v1beta1"
 	istio_mixer_v1 "istio.io/api/mixer/v1"
-	"istio.io/istio/mixer/test/spyAdapter"
+	spyadapter "istio.io/istio/mixer/test/spyAdapter"
 	e2eTmpl "istio.io/istio/mixer/test/spyAdapter/template"
 )
 
@@ -87,7 +87,7 @@ func TestRefTracking(t *testing.T) {
 				"destination.service":   "echosrv2.istio.svc.cluster.local",
 				"destination.namespace": "istio",
 				"source.service":        "foo",
-				"request.headers": map[string]interface{}{
+				"request.headers": map[string]string{
 					"x-request-id": "foo",
 				},
 			},
@@ -119,7 +119,7 @@ func TestRefTracking(t *testing.T) {
 		}
 
 		if tt.behaviors == nil {
-			tt.behaviors = []spyAdapter.AdapterBehavior{{Name: "fakeHandler"}}
+			tt.behaviors = []spyadapter.AdapterBehavior{{Name: "fakeHandler"}}
 		}
 
 		t.Run(tt.name, func(t *testing.T) {

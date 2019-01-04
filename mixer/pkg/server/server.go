@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	ot "github.com/opentracing/opentracing-go"
 	oprometheus "github.com/prometheus/client_golang/prometheus"
@@ -38,6 +39,7 @@ import (
 	"istio.io/istio/mixer/pkg/config"
 	"istio.io/istio/mixer/pkg/config/crd"
 	"istio.io/istio/mixer/pkg/config/store"
+	"istio.io/istio/mixer/pkg/loadshedding"
 	"istio.io/istio/mixer/pkg/pool"
 	"istio.io/istio/mixer/pkg/runtime"
 	runtimeconfig "istio.io/istio/mixer/pkg/runtime/config"
@@ -81,6 +83,7 @@ type patchTable struct {
 	listen        listenFunc
 	configLog     func(options *log.Options) error
 	runtimeListen func(runtime *runtime.Runtime) error
+	remove        func(name string) error
 
 	// monitoring-related setup
 	newOpenCensusExporter   func() (view.Exporter, error)
@@ -100,6 +103,7 @@ func newPatchTable() *patchTable {
 		listen:        net.Listen,
 		configLog:     log.Configure,
 		runtimeListen: func(rt *runtime.Runtime) error { return rt.StartListening() },
+		remove:        os.Remove,
 		newOpenCensusExporter: func() (view.Exporter, error) {
 			return prometheus.NewExporter(prometheus.Options{Registry: oprometheus.DefaultRegisterer.(*oprometheus.Registry)})
 		},
@@ -107,7 +111,7 @@ func newPatchTable() *patchTable {
 	}
 }
 
-func newServer(a *Args, p *patchTable) (*Server, error) {
+func newServer(a *Args, p *patchTable) (server *Server, err error) {
 	if err := a.validate(); err != nil {
 		return nil, err
 	}
@@ -116,15 +120,20 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		return nil, err
 	}
 
-	apiPoolSize := a.APIWorkerPoolSize
-	adapterPoolSize := a.AdapterWorkerPoolSize
-
 	s := &Server{}
-	s.gp = pool.NewGoroutinePool(apiPoolSize, a.SingleThreaded)
-	s.gp.AddWorkers(apiPoolSize)
 
-	s.adapterGP = pool.NewGoroutinePool(adapterPoolSize, a.SingleThreaded)
-	s.adapterGP.AddWorkers(adapterPoolSize)
+	defer func() {
+		// If return with error, need to close the server.
+		if err != nil {
+			_ = s.Close()
+		}
+	}()
+
+	s.gp = pool.NewGoroutinePool(a.APIWorkerPoolSize, a.SingleThreaded)
+	s.gp.AddWorkers(a.APIWorkerPoolSize - 1)
+
+	s.adapterGP = pool.NewGoroutinePool(a.AdapterWorkerPoolSize, a.SingleThreaded)
+	s.adapterGP.AddWorkers(a.AdapterWorkerPoolSize - 1)
 
 	tmplRepo := template.NewRepository(a.Templates)
 	adapterMap := config.AdapterInfoMap(a.Adapters, tmplRepo.SupportsTemplate)
@@ -137,49 +146,30 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 	grpcOptions = append(grpcOptions, grpc.MaxConcurrentStreams(uint32(a.MaxConcurrentStreams)))
 	grpcOptions = append(grpcOptions, grpc.MaxRecvMsgSize(int(a.MaxMessageSize)))
 
-	var err error
-
 	if a.TracingOptions.TracingEnabled() {
 		s.tracer, err = p.configTracing("istio-mixer", a.TracingOptions)
 		if err != nil {
-			_ = s.Close()
 			return nil, fmt.Errorf("unable to setup tracing")
 		}
 		grpcOptions = append(grpcOptions, grpc.UnaryInterceptor(otgrpc.OpenTracingServerInterceptor(ot.GlobalTracer())))
 	}
 
 	// get the network stuff setup
-	network := "tcp"
-	address := fmt.Sprintf(":%d", a.APIPort)
-	if a.APIAddress != "" {
-		idx := strings.Index(a.APIAddress, "://")
-		if idx < 0 {
-			address = a.APIAddress
-		} else {
-			network = a.APIAddress[:idx]
-			address = a.APIAddress[idx+3:]
-		}
-	}
+	network, address := extractNetAddress(a.APIPort, a.APIAddress)
 
 	if network == "unix" {
 		// remove Unix socket before use.
-		if err = os.Remove(address); err != nil && !os.IsNotExist(err) {
+		if err = p.remove(address); err != nil && !os.IsNotExist(err) {
 			// Anything other than "file not found" is an error.
 			return nil, fmt.Errorf("unable to remove unix://%s: %v", address, err)
 		}
 	}
 
 	if s.listener, err = p.listen(network, address); err != nil {
-		_ = s.Close()
 		return nil, fmt.Errorf("unable to listen: %v", err)
 	}
 
 	st := a.ConfigStore
-	if st != nil && a.ConfigStoreURL != "" {
-		_ = s.Close()
-		return nil, fmt.Errorf("invalid arguments: both ConfigStore and ConfigStoreURL are specified")
-	}
-
 	if st == nil {
 		configStoreURL := a.ConfigStoreURL
 		if configStoreURL == "" {
@@ -188,8 +178,7 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 
 		reg := store.NewRegistry(config.StoreInventory()...)
 		groupVersion := &schema.GroupVersion{Group: crd.ConfigAPIGroup, Version: crd.ConfigAPIVersion}
-		if st, err = reg.NewStore(configStoreURL, groupVersion, a.CredentialOptions); err != nil {
-			_ = s.Close()
+		if st, err = reg.NewStore(configStoreURL, groupVersion, a.CredentialOptions, runtimeconfig.CriticalKinds()); err != nil {
 			return nil, fmt.Errorf("unable to connect to the configuration server: %v", err)
 		}
 	}
@@ -201,7 +190,13 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		templateMap[k] = &t
 	}
 
-	kinds := runtimeconfig.KindMap(adapterMap, templateMap)
+	var kinds map[string]proto.Message
+	if a.UseAdapterCRDs {
+		kinds = runtimeconfig.KindMap(adapterMap, templateMap)
+	} else {
+		kinds = runtimeconfig.KindMap(map[string]*adapter.Info{}, templateMap)
+	}
+
 	if err := st.Init(kinds); err != nil {
 		return nil, fmt.Errorf("unable to initialize config store: %v", err)
 	}
@@ -217,7 +212,6 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		s.gp, s.adapterGP, a.TracingOptions.TracingEnabled())
 
 	if err = p.runtimeListen(rt); err != nil {
-		_ = s.Close()
 		return nil, fmt.Errorf("unable to listen: %v", err)
 	}
 
@@ -241,10 +235,15 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		return nil, fmt.Errorf("could not register default server views: %v", err)
 	}
 
-	grpcOptions = append(grpcOptions, grpc.StatsHandler(&ocgrpc.ServerHandler{}))
+	throttler := loadshedding.NewThrottler(a.LoadSheddingOptions)
+	if eval := throttler.Evaluator(loadshedding.GRPCLatencyEvaluatorName); eval != nil {
+		grpcOptions = append(grpcOptions, grpc.StatsHandler(newMultiStatsHandler(&ocgrpc.ServerHandler{}, eval.(*loadshedding.GRPCLatencyEvaluator))))
+	} else {
+		grpcOptions = append(grpcOptions, grpc.StatsHandler(&ocgrpc.ServerHandler{}))
+	}
 
 	s.server = grpc.NewServer(grpcOptions...)
-	mixerpb.RegisterMixerServer(s.server, api.NewGRPCServer(s.dispatcher, s.gp, s.checkCache))
+	mixerpb.RegisterMixerServer(s.server, api.NewGRPCServer(s.dispatcher, s.gp, s.checkCache, throttler))
 
 	if a.LivenessProbeOptions.IsValid() {
 		s.livenessProbe = probe.NewFileController(a.LivenessProbeOptions)
@@ -261,13 +260,25 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 
 	log.Info("Starting monitor server...")
 	if s.monitor, err = p.startMonitor(a.MonitoringPort, a.EnableProfiling, p.listen); err != nil {
-		_ = s.Close()
 		return nil, fmt.Errorf("unable to setup monitoring: %v", err)
 	}
 
 	s.controlZ, _ = ctrlz.Run(a.IntrospectionOptions, nil)
 
 	return s, nil
+}
+
+func extractNetAddress(apiPort uint16, apiAddress string) (string, string) {
+	if apiAddress != "" {
+		idx := strings.Index(apiAddress, "://")
+		if idx < 0 {
+			return "tcp", apiAddress
+		}
+
+		return apiAddress[:idx], apiAddress[idx+3:]
+	}
+
+	return "tcp", fmt.Sprintf(":%d", apiPort)
 }
 
 // Run enables Mixer to start receiving gRPC requests on its main API port.
@@ -296,6 +307,8 @@ func (s *Server) Wait() error {
 
 // Close cleans up resources used by the server.
 func (s *Server) Close() error {
+	log.Info("Close server")
+
 	if s.shutdown != nil {
 		s.server.GracefulStop()
 		_ = s.Wait()

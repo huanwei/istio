@@ -33,56 +33,15 @@ import (
 	"istio.io/istio/pkg/probe"
 	"istio.io/istio/pkg/version"
 	"istio.io/istio/security/pkg/caclient"
-	"istio.io/istio/security/pkg/caclient/protocol"
 	"istio.io/istio/security/pkg/cmd"
+	"istio.io/istio/security/pkg/k8s/controller"
 	"istio.io/istio/security/pkg/pki/ca"
-	"istio.io/istio/security/pkg/pki/ca/controller"
-	pkiutil "istio.io/istio/security/pkg/pki/util"
-	"istio.io/istio/security/pkg/platform"
 	probecontroller "istio.io/istio/security/pkg/probe"
 	"istio.io/istio/security/pkg/registry"
 	"istio.io/istio/security/pkg/registry/kube"
 	caserver "istio.io/istio/security/pkg/server/ca"
 	"istio.io/istio/security/pkg/server/monitoring"
 )
-
-// TODO(myidpt): move the following constants to pkg/cmd.
-const (
-	defaultSelfSignedCACertTTL = 365 * 24 * time.Hour
-
-	defaultRequestedCACertTTL = 365 * 24 * time.Hour
-
-	defaultMaxWorkloadCertTTL = 90 * 24 * time.Hour
-
-	defaultWorkloadCertTTL = 90 * 24 * time.Hour
-
-	// The default length of certificate rotation grace period, configured as
-	// the ratio of the certificate TTL.
-	defaultWorkloadCertGracePeriodRatio = 0.5
-
-	// The default minimum grace period for workload cert rotation.
-	defaultWorkloadMinCertGracePeriod = 10 * time.Minute
-
-	defaultProbeCheckInterval = 30 * time.Second
-
-	// The default length of certificate rotation grace period, configured as
-	// the percentage of the certificate TTL.
-	defaultCSRGracePeriodPercentage = 50
-
-	// The default initial interval between retries to send CSR to upstream CA.
-	defaultCSRInitialRetrialInterval = time.Second
-
-	// The default value of CSR retries for Citadel to send CSR to upstream CA.
-	defaultCSRMaxRetries = 10
-
-	// The key for the environment variable that specifies the namespace.
-	listenedNamespaceKey = "NAMESPACE"
-)
-
-type keyCertBundleRotator interface {
-	Start(chan<- error)
-	Stop()
-}
 
 type cliOptions struct { // nolint: maligned
 	listenedNamespace       string
@@ -136,7 +95,7 @@ type cliOptions struct { // nolint: maligned
 	customDNSNames string
 
 	// domain to use in SPIFFE identity URLs
-	identityDomain string
+	trustDomain string
 
 	// Enable dual-use certs - SPIFFE in SAN and in CommonName
 	dualUse bool
@@ -152,6 +111,7 @@ var (
 	rootCmd = &cobra.Command{
 		Use:   "istio_ca",
 		Short: "Istio Certificate Authority (CA).",
+		Args:  cobra.ExactArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
 			runCA()
 		},
@@ -170,7 +130,7 @@ var (
 
 func fatalf(template string, args ...interface{}) {
 	if len(args) > 0 {
-		log.Errorf(template, args)
+		log.Errorf(template, args...)
 	} else {
 		log.Errorf(template)
 	}
@@ -182,7 +142,7 @@ func init() {
 	// General configuration.
 	flags.StringVar(&opts.listenedNamespace, "listened-namespace", "",
 		"Select a namespace for the CA to listen to. If unspecified, Citadel tries to use the ${"+
-			listenedNamespaceKey+"} environment variable. If neither is set, Citadel listens to all namespaces.")
+			cmd.ListenedNamespaceKey+"} environment variable. If neither is set, Citadel listens to all namespaces.")
 	flags.StringVar(&opts.istioCaStorageNamespace, "citadel-storage-namespace", "istio-system", "Namespace where "+
 		"the Citadel pod is running. Will not be used if explicit file or other storage mechanism is specified.")
 
@@ -199,29 +159,29 @@ func init() {
 	flags.BoolVar(&opts.selfSignedCA, "self-signed-ca", false,
 		"Indicates whether to use auto-generated self-signed CA certificate. "+
 			"When set to true, the '--signing-cert' and '--signing-key' options are ignored.")
-	flags.DurationVar(&opts.selfSignedCACertTTL, "self-signed-ca-cert-ttl", defaultSelfSignedCACertTTL,
+	flags.DurationVar(&opts.selfSignedCACertTTL, "self-signed-ca-cert-ttl", cmd.DefaultSelfSignedCACertTTL,
 		"The TTL of self-signed CA root certificate")
-	flags.StringVar(&opts.identityDomain, "identity-domain", controller.DefaultIdentityDomain,
-		fmt.Sprintf("The domain to use for identities (default: %s)", controller.DefaultIdentityDomain))
+	flags.StringVar(&opts.trustDomain, "trust-domain", controller.DefaultTrustDomain,
+		fmt.Sprintf("The domain serves to identify the system with spiffe (default: %s)", controller.DefaultTrustDomain))
 
 	// Upstream CA configuration if Citadel interacts with upstream CA.
 	flags.StringVar(&opts.cAClientConfig.CAAddress, "upstream-ca-address", "", "The IP:port address of the upstream "+
 		"CA. When set, the CA will rely on the upstream Citadel to provision its own certificate.")
 	flags.StringVar(&opts.cAClientConfig.Org, "org", "", "Organization for the cert")
-	flags.DurationVar(&opts.cAClientConfig.RequestedCertTTL, "requested-ca-cert-ttl", defaultRequestedCACertTTL,
+	flags.DurationVar(&opts.cAClientConfig.RequestedCertTTL, "requested-ca-cert-ttl", cmd.DefaultRequestedCACertTTL,
 		"The requested TTL for the workload")
 	flags.IntVar(&opts.cAClientConfig.RSAKeySize, "key-size", 2048, "Size of generated private key")
 
 	// Certificate signing configuration.
-	flags.DurationVar(&opts.workloadCertTTL, "workload-cert-ttl", defaultWorkloadCertTTL,
+	flags.DurationVar(&opts.workloadCertTTL, "workload-cert-ttl", cmd.DefaultWorkloadCertTTL,
 		"The TTL of issued workload certificates")
-	flags.DurationVar(&opts.maxWorkloadCertTTL, "max-workload-cert-ttl", defaultMaxWorkloadCertTTL,
+	flags.DurationVar(&opts.maxWorkloadCertTTL, "max-workload-cert-ttl", cmd.DefaultMaxWorkloadCertTTL,
 		"The max TTL of issued workload certificates")
 	flags.Float32Var(&opts.workloadCertGracePeriodRatio, "workload-cert-grace-period-ratio",
-		defaultWorkloadCertGracePeriodRatio, "The workload certificate rotation grace period, as a ratio of the "+
+		cmd.DefaultWorkloadCertGracePeriodRatio, "The workload certificate rotation grace period, as a ratio of the "+
 			"workload certificate TTL.")
 	flags.DurationVar(&opts.workloadCertMinGracePeriod, "workload-cert-min-grace-period",
-		defaultWorkloadMinCertGracePeriod, "The minimum workload certificate rotation grace period.")
+		cmd.DefaultWorkloadMinCertGracePeriod, "The minimum workload certificate rotation grace period.")
 
 	// gRPC server for signing CSRs.
 	flags.StringVar(&opts.grpcHosts, "grpc-host-identities", "istio-ca,istio-citadel",
@@ -244,7 +204,7 @@ func init() {
 		"Path to the file for the liveness probe.")
 	flags.DurationVar(&opts.LivenessProbeOptions.UpdateInterval, "liveness-probe-interval", 0,
 		"Interval of updating file for the liveness probe.")
-	flags.DurationVar(&opts.probeCheckInterval, "probe-check-interval", defaultProbeCheckInterval,
+	flags.DurationVar(&opts.probeCheckInterval, "probe-check-interval", cmd.DefaultProbeCheckInterval,
 		"Interval of checking the liveness of the CA.")
 
 	flags.BoolVar(&opts.appendDNSNames, "append-dns-names", true,
@@ -252,7 +212,7 @@ func init() {
 	flags.StringVar(&opts.customDNSNames, "custom-dns-names", "",
 		"The list of account.namespace:customdns names, separated by comma.")
 
-	// Dual-use certficate signing
+	// Dual-use certificate signing
 	flags.BoolVar(&opts.dualUse, "experimental-dual-use",
 		false, "Enable dual-use mode. Generates certificates with a CommonName identical to the SAN.")
 
@@ -291,7 +251,7 @@ func runCA() {
 
 	_, _ = ctrlz.Run(opts.ctrlzOptions, nil)
 
-	if value, exists := os.LookupEnv(listenedNamespaceKey); exists {
+	if value, exists := os.LookupEnv(cmd.ListenedNamespaceKey); exists {
 		// When -namespace is not set, try to read the namespace from environment variable.
 		if opts.listenedNamespace == "" {
 			opts.listenedNamespace = value
@@ -334,7 +294,7 @@ func runCA() {
 	ca := createCA(cs.CoreV1())
 	// For workloads in K8s, we apply the configured workload cert TTL.
 	sc, err := controller.NewSecretController(ca,
-		opts.workloadCertTTL, opts.identityDomain,
+		opts.workloadCertTTL, opts.trustDomain,
 		opts.workloadCertGracePeriodRatio, opts.workloadCertMinGracePeriod, opts.dualUse,
 		cs.CoreV1(), opts.signCACerts, opts.listenedNamespace, webhooks)
 	if err != nil {
@@ -356,7 +316,8 @@ func runCA() {
 
 		ch := make(chan struct{})
 
-		// monitor service objects with "alpha.istio.io/kubernetes-serviceaccounts" annotation
+		// monitor service objects with "alpha.istio.io/kubernetes-serviceaccounts" and
+		// "alpha.istio.io/canonical-serviceaccounts" annotations
 		serviceController := kube.NewServiceController(cs.CoreV1(), opts.listenedNamespace, reg)
 		serviceController.Run(ch)
 
@@ -395,7 +356,18 @@ func runCA() {
 	rotatorErrCh := make(chan error)
 	// Start CA client if the upstream CA address is specified.
 	if len(opts.cAClientConfig.CAAddress) != 0 {
-		rotator, creationErr := createKeyCertBundleRotator(ca.GetCAKeyCertBundle())
+		config := &opts.cAClientConfig
+		config.Env = "onprem"
+		config.Platform = "vm"
+		config.ForCA = true
+		config.CertFile = opts.signingCertFile
+		config.KeyFile = opts.signingKeyFile
+		config.CertChainFile = opts.certChainFile
+		config.RootCertFile = opts.rootCertFile
+		config.CSRGracePeriodPercentage = cmd.DefaultCSRGracePeriodPercentage
+		config.CSRMaxRetries = cmd.DefaultCSRMaxRetries
+		config.CSRInitialRetrialInterval = cmd.DefaultCSRInitialRetrialInterval
+		rotator, creationErr := caclient.NewKeyCertBundleRotator(config, ca.GetCAKeyCertBundle())
 		if creationErr != nil {
 			fatalf("Failed to create key cert bundle rotator: %v", creationErr)
 		}
@@ -431,7 +403,7 @@ func createCA(core corev1.SecretsGetter) *ca.IstioCA {
 	if opts.selfSignedCA {
 		log.Info("Use self-signed certificate as the CA certificate")
 		caOpts, err = ca.NewSelfSignedIstioCAOptions(opts.selfSignedCACertTTL, opts.workloadCertTTL,
-			opts.maxWorkloadCertTTL, opts.identityDomain, opts.dualUse,
+			opts.maxWorkloadCertTTL, opts.trustDomain, opts.dualUse,
 			opts.istioCaStorageNamespace, core)
 		if err != nil {
 			fatalf("Failed to create a self-signed Citadel (error: %v)", err)
@@ -473,38 +445,6 @@ func generateConfig() *rest.Config {
 		fatalf("Failed to create a config (error: %s)", err)
 	}
 	return c
-}
-
-func createKeyCertBundleRotator(keycert pkiutil.KeyCertBundle) (keyCertBundleRotator, error) {
-	config := &opts.cAClientConfig
-	// Currently cluster CA needs key/cert to talk to upstream CA.
-	config.Env = "onprem"
-	config.Platform = "vm"
-	config.ForCA = true
-	config.CertFile = opts.signingCertFile
-	config.KeyFile = opts.signingKeyFile
-	config.CertChainFile = opts.certChainFile
-	config.RootCertFile = opts.rootCertFile
-	config.CSRGracePeriodPercentage = defaultCSRGracePeriodPercentage
-	config.CSRMaxRetries = defaultCSRMaxRetries
-	config.CSRInitialRetrialInterval = defaultCSRInitialRetrialInterval
-	pc, err := platform.NewClient(config.Env, config.RootCertFile, config.KeyFile, config.CertChainFile, config.CAAddress)
-	if err != nil {
-		return nil, err
-	}
-	dial, err := pc.GetDialOptions()
-	if err != nil {
-		return nil, err
-	}
-	grpcConn, err := protocol.NewGrpcConnection(config.CAAddress, dial)
-	if err != nil {
-		return nil, err
-	}
-	cac, err := caclient.NewCAClient(pc, grpcConn, config.CSRMaxRetries, config.CSRInitialRetrialInterval)
-	if err != nil {
-		return nil, err
-	}
-	return caclient.NewKeyCertBundleRotator(config, cac, keycert)
 }
 
 func verifyCommandLineOptions() {

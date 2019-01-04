@@ -1,26 +1,40 @@
 #!/bin/bash
 
+# Copyright 2018 Istio Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 die () {
   echo "ERROR: $*. Aborting." >&2
   exit 1
 }
 
-WD="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-ROOT="$(dirname "$WD")"
+SCRIPTPATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ROOTDIR="$(dirname "$SCRIPTPATH")"
 
-if [ ! -e "$ROOT/Gopkg.lock" ]; then
+if [ ! -e "$ROOTDIR/Gopkg.lock" ]; then
   echo "Please run 'dep ensure' first"
   exit 1
 fi
 
 set -e
 
-outdir=$ROOT
-file=$ROOT
-protoc="$ROOT/bin/protoc.sh"
+outdir=$ROOTDIR
+file=$ROOTDIR
+protoc="$ROOTDIR/bin/protoc.sh"
 
-optimport=$ROOT
-template=$ROOT
+optimport=$ROOTDIR
+template=$ROOTDIR
 
 optproto=false
 optadapter=false
@@ -57,15 +71,15 @@ done
 # echo "outdir: ${outdir}"
 
 # Ensure expected GOPATH setup
-if [ "$ROOT" != "${GOPATH-$HOME/go}/src/istio.io/istio" ]; then
+if [ "$ROOTDIR" != "${GOPATH-$HOME/go}/src/istio.io/istio" ]; then
   die "Istio not found in GOPATH/src/istio.io/"
 fi
 
 IMPORTS=(
-  "--proto_path=${ROOT}"
-  "--proto_path=${ROOT}/vendor/istio.io/api"
-  "--proto_path=${ROOT}/vendor/github.com/gogo/protobuf"
-  "--proto_path=${ROOT}/vendor/github.com/gogo/googleapis"
+  "--proto_path=${ROOTDIR}"
+  "--proto_path=${ROOTDIR}/vendor/istio.io/api"
+  "--proto_path=${ROOTDIR}/vendor/github.com/gogo/protobuf"
+  "--proto_path=${ROOTDIR}/vendor/github.com/gogo/googleapis"
   "--proto_path=$optimport"
 )
 
@@ -100,9 +114,9 @@ if [ "$opttemplate" = true ]; then
     "google/protobuf/any.proto:github.com/gogo/protobuf/types"
     "gogoproto/gogo.proto:github.com/gogo/protobuf/gogoproto"
     "google/protobuf/duration.proto:github.com/gogo/protobuf/types"
-    "google/protobuf/timestamp.proto=github.com/gogo/protobuf/types"
-    "google/rpc/status.proto=github.com/gogo/googleapis/google/rpc"
-    "google/protobuf/struct.proto=github.com/gogo/protobuf/types"
+    "google/protobuf/timestamp.proto:github.com/gogo/protobuf/types"
+    "google/rpc/status.proto:github.com/gogo/googleapis/google/rpc"
+    "google/protobuf/struct.proto:github.com/gogo/protobuf/types"
   )
 
   TMPL_GEN_MAP=()

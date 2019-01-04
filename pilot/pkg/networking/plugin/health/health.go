@@ -23,11 +23,11 @@ import (
 	hcfilter "github.com/envoyproxy/go-control-plane/envoy/config/filter/http/health_check/v2"
 	http_conn "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
 	xdsutil "github.com/envoyproxy/go-control-plane/pkg/util"
-	"github.com/gogo/protobuf/types"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/plugin"
 	"istio.io/istio/pilot/pkg/networking/util"
+	"istio.io/istio/pkg/proto"
 )
 
 // Plugin implements Istio mTLS auth
@@ -42,17 +42,17 @@ func NewPlugin() plugin.Plugin {
 func buildHealthCheckFilter(probe *model.Probe) *http_conn.HttpFilter {
 	return &http_conn.HttpFilter{
 		Name: xdsutil.HealthCheck,
-		Config: util.MessageToStruct(&hcfilter.HealthCheck{
-			PassThroughMode: &types.BoolValue{
-				Value: true,
-			},
-			Headers: []*envoy_api_v2_route.HeaderMatcher{
-				{
-					Name:                 ":path",
-					HeaderMatchSpecifier: &envoy_api_v2_route.HeaderMatcher_ExactMatch{ExactMatch: probe.Path},
+		ConfigType: &http_conn.HttpFilter_Config{
+			Config: util.MessageToStruct(&hcfilter.HealthCheck{
+				PassThroughMode: proto.BoolTrue,
+				Headers: []*envoy_api_v2_route.HeaderMatcher{
+					{
+						Name:                 ":path",
+						HeaderMatchSpecifier: &envoy_api_v2_route.HeaderMatcher_ExactMatch{ExactMatch: probe.Path},
+					},
 				},
-			},
-		}),
+			}),
+		},
 	}
 }
 
@@ -120,8 +120,7 @@ func (Plugin) OnInboundListener(in *plugin.InputParams, mutable *plugin.MutableO
 }
 
 // OnInboundCluster implements the Plugin interface method.
-func (Plugin) OnInboundCluster(env *model.Environment, node *model.Proxy, push *model.PushContext, service *model.Service,
-	servicePort *model.Port, cluster *xdsapi.Cluster) {
+func (Plugin) OnInboundCluster(in *plugin.InputParams, cluster *xdsapi.Cluster) {
 }
 
 // OnOutboundRouteConfiguration implements the Plugin interface method.
@@ -133,8 +132,7 @@ func (Plugin) OnInboundRouteConfiguration(in *plugin.InputParams, route *xdsapi.
 }
 
 // OnOutboundCluster implements the Plugin interface method.
-func (Plugin) OnOutboundCluster(env *model.Environment, push *model.PushContext, service *model.Service,
-	servicePort *model.Port, cluster *xdsapi.Cluster) {
+func (Plugin) OnOutboundCluster(in *plugin.InputParams, cluster *xdsapi.Cluster) {
 }
 
 // OnInboundFilterChains is called whenever a plugin needs to setup the filter chains, including relevant filter chain configuration.

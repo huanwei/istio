@@ -54,14 +54,12 @@ func (envoyfilterplugin) OnInboundListener(in *plugin.InputParams, mutable *plug
 }
 
 // OnOutboundCluster implements the Plugin interface method.
-func (envoyfilterplugin) OnOutboundCluster(env *model.Environment, push *model.PushContext,
-	service *model.Service, servicePort *model.Port, cluster *xdsapi.Cluster) {
+func (envoyfilterplugin) OnOutboundCluster(in *plugin.InputParams, cluster *xdsapi.Cluster) {
 	// do nothing
 }
 
 // OnInboundCluster implements the Plugin interface method.
-func (envoyfilterplugin) OnInboundCluster(env *model.Environment, node *model.Proxy, push *model.PushContext,
-	service *model.Service, servicePort *model.Port, cluster *xdsapi.Cluster) {
+func (envoyfilterplugin) OnInboundCluster(in *plugin.InputParams, cluster *xdsapi.Cluster) {
 	// do nothing
 }
 
@@ -232,8 +230,8 @@ func listenerMatch(in *plugin.InputParams, direction string, listenerIP net.IP,
 
 func insertHTTPFilter(filterChain *plugin.FilterChain, envoyFilter *networking.EnvoyFilter_Filter) {
 	filter := &http_conn.HttpFilter{
-		Name:   envoyFilter.FilterName,
-		Config: envoyFilter.FilterConfig,
+		Name:       envoyFilter.FilterName,
+		ConfigType: &http_conn.HttpFilter_Config{Config: envoyFilter.FilterConfig},
 	}
 
 	position := networking.EnvoyFilter_InsertPosition_FIRST
@@ -271,8 +269,8 @@ func insertHTTPFilter(filterChain *plugin.FilterChain, envoyFilter *networking.E
 
 func insertNetworkFilter(filterChain *plugin.FilterChain, envoyFilter *networking.EnvoyFilter_Filter) {
 	filter := &listener.Filter{
-		Name:   envoyFilter.FilterName,
-		Config: envoyFilter.FilterConfig,
+		Name:       envoyFilter.FilterName,
+		ConfigType: &listener.Filter_Config{Config: envoyFilter.FilterConfig},
 	}
 
 	position := networking.EnvoyFilter_InsertPosition_FIRST

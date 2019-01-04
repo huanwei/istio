@@ -30,12 +30,14 @@ import (
 
 func TestSyncz(t *testing.T) {
 	t.Run("return the sent and ack status of adsClient connections", func(t *testing.T) {
-		initLocalPilotTestEnv(t)
-		adsstr, err := connectADS(util.MockPilotGrpcAddr)
+		_, tearDown := initLocalPilotTestEnv(t)
+		defer tearDown()
+
+		adsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer adsstr.CloseSend()
+		defer cancel()
 
 		// Need to send two of each so that the second sends an Ack that is picked up
 		if err := sendEDSReq([]string{"outbound|9080||app2.default.svc.cluster.local"}, sidecarId(app3Ip, "syncApp"), adsstr); err != nil {
@@ -73,12 +75,14 @@ func TestSyncz(t *testing.T) {
 		verifySyncStatus(t, node.ID, true, true)
 	})
 	t.Run("sync status not set when Nackd", func(t *testing.T) {
-		initLocalPilotTestEnv(t)
-		adsstr, err := connectADS(util.MockPilotGrpcAddr)
+		_, tearDown := initLocalPilotTestEnv(t)
+		defer tearDown()
+
+		adsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer adsstr.CloseSend()
+		defer cancel()
 
 		if err := sendEDSReq([]string{"outbound|9080||app2.default.svc.cluster.local"}, sidecarId(app3Ip, "syncApp2"), adsstr); err != nil {
 			t.Fatal(err)
@@ -104,7 +108,7 @@ func TestSyncz(t *testing.T) {
 		if err := sendRDSNack(sidecarId(app3Ip, "syncApp2"), []string{"80", "8080"}, adsstr); err != nil {
 			t.Fatal(err)
 		}
-		for i := 0; i < 5; i++ {
+		for i := 0; i < 4; i++ {
 			_, err := adsReceive(adsstr, 5*time.Second)
 			if err != nil {
 				t.Fatal("Recv failed", err)
@@ -205,13 +209,15 @@ func TestConfigDump(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := initLocalPilotTestEnv(t)
+			s, tearDown := initLocalPilotTestEnv(t)
+			defer tearDown()
+
 			for i := 0; i < 2; i++ {
-				envoy, err := connectADS(util.MockPilotGrpcAddr)
+				envoy, cancel, err := connectADS(util.MockPilotGrpcAddr)
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer envoy.CloseSend()
+				defer cancel()
 				if err := sendCDSReq(sidecarId(app3Ip, "dumpApp"), envoy); err != nil {
 					t.Fatal(err)
 				}

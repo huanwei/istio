@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors. All Rights Reserved.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -86,6 +86,7 @@ static_resources:
 // Check attributes from a good GET request
 const checkAttributesOkGet = `
 {
+  "context.reporter.uid": "",
   "connection.mtls": false,
   "origin.ip": "[127 0 0 1]",
   "context.protocol": "http",
@@ -98,6 +99,8 @@ const checkAttributesOkGet = `
   "request.method": "GET",
   "request.scheme": "http",
   "request.url_path": "/echo",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.namespace": "XYZ222",
   "target.uid": "POD222",
   "request.headers": {
@@ -149,8 +152,8 @@ func makeListener(s *env.TestSetup, key string) *v2.Listener {
 							"mixer": mxServiceConfig,
 						}}}}}}},
 		HttpFilters: []*hcm.HttpFilter{{
-			Name:   "mixer",
-			Config: mxConf,
+			Name:       "mixer",
+			ConfigType: &hcm.HttpFilter_Config{mxConf},
 		}, {
 			Name: util.Router,
 		}},
@@ -168,8 +171,8 @@ func makeListener(s *env.TestSetup, key string) *v2.Listener {
 			PortSpecifier: &core.SocketAddress_PortValue{PortValue: uint32(s.Ports().ServerProxyPort)}}}},
 		FilterChains: []listener.FilterChain{{
 			Filters: []listener.Filter{{
-				Name:   util.HTTPConnectionManager,
-				Config: pbst,
+				Name:       util.HTTPConnectionManager,
+				ConfigType: &listener.Filter_Config{pbst},
 			}},
 		}},
 	}

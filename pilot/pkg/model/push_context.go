@@ -26,7 +26,7 @@ import (
 	networking "istio.io/api/networking/v1alpha3"
 )
 
-// PushContext tracks the status of a mush - metrics and errors.
+// PushContext tracks the status of a push - metrics and errors.
 // Metrics are reset after a push - at the beginning all
 // values are zero, and when push completes the status is reset.
 // The struct is exposed in a debug endpoint - fields public to allow
@@ -47,38 +47,77 @@ type PushContext struct {
 	// data should not be changed by plugins.
 	Mutex sync.Mutex `json:"-,omitempty"`
 
-	// Services list all services in the system at the time push started.
-	Services []*Service `json:"-,omitempty"`
+	// The following data can be either obtained as a whole or
+	// only those in the proxy's config namespace. Keep them private
+	// and use accessor functions to return the appropriate data
+
+	// all services in the system at the time push started.
+	allServices            []*Service `json:"-,omitempty"`
+	virtualServiceConfigs  []Config   `json:"-,omitempty"`
+	destinationRuleHosts   []Hostname
+	destinationRuleByHosts map[Hostname]*combinedDestinationRule
+	////////// END ////////
+
+	// The following data is either a global index or used in the inbound path.
+	// Namespace specific views do not apply here.
 
 	// ServiceByHostname has all services, indexed by hostname.
 	ServiceByHostname map[Hostname]*Service `json:"-,omitempty"`
 
-	//
-	//ConfigsByType map[string][]*Config
-
-	// TODO: add the remaining O(n**2) model, deprecate/remove all remaining
-	// uses of model:
-
-	//Endpoints map[string][]*ServiceInstance
-	//ServicesForProxy map[string][]*ServiceInstance
-	//ManagementPorts map[string]*PortList
-	//WorkloadHealthCheck map[string]*ProbeList
-
-	// ServiceAccounts represents the list of service accounts
-	// for a service.
-	//	ServiceAccounts map[string][]string
-	// Temp: the code in alpha3 should use VirtualService directly
-	VirtualServiceConfigs []Config `json:"-,omitempty"`
-
-	destinationRuleHosts   []Hostname
-	destinationRuleByHosts map[Hostname]*combinedDestinationRule
-
-	//TODO: gateways              []*networking.Gateway
+	// AuthzPolicies stores the existing authorization policies in the cluster. Could be nil if there
+	// are no authorization policies in the cluster.
+	AuthzPolicies *AuthorizationPolicies
 
 	// Env has a pointer to the shared environment used to create the snapshot.
 	Env *Environment `json:"-,omitempty"`
 
+	// ServicePort2Name is used to keep track of service name and port mapping.
+	// This is needed because ADS names use port numbers, while endpoints use
+	// port names. The key is the service name. If a service or port are not found,
+	// the endpoint needs to be re-evaluated later (eventual consistency)
+	ServicePort2Name map[string]PortList `json:"-"`
+
 	initDone bool
+}
+
+// XDSUpdater is used for direct updates of the xDS model and incremental push.
+// Pilot uses multiple registries - for example each K8S cluster is a registry instance,
+// as well as consul and future EDS or MCP sources. Each registry is responsible for
+// tracking a set of endpoints associated with mesh services, and calling the EDSUpdate
+// on changes. A registry may group endpoints for a service in smaller subsets - for
+// example by deployment, or to deal with very large number of endpoints for a service.
+// We want to avoid passing around large objects - like full list of endpoints for a registry,
+// or the full list of endpoints for a service across registries, since it limits scalability.
+//
+// Future optimizations will include grouping the endpoints by labels, gateway or region to
+// reduce the time when subsetting or split-horizon is used. This design assumes pilot
+// tracks all endpoints in the mesh and they fit in RAM - so limit is few M endpoints.
+// It is possible to split the endpoint tracking in future.
+type XDSUpdater interface {
+
+	// EDSUpdate is called when the list of endpoints or labels in a ServiceEntry is
+	// changed. For each cluster and hostname, the full list of active endpoints (including empty list)
+	// must be sent. The shard name is used as a key - current implementation is using the registry
+	// name.
+	EDSUpdate(shard, hostname string, entry []*IstioEndpoint) error
+
+	// SvcUpdate is called when a service port mapping definition is updated.
+	// This interface is WIP - labels, annotations and other changes to service may be
+	// updated to force a EDS and CDS recomputation and incremental push, as it doesn't affect
+	// LDS/RDS.
+	SvcUpdate(shard, hostname string, ports map[string]uint32, rports map[uint32]string)
+
+	// WorkloadUpdate is called by a registry when the labels or annotations on a workload have changed.
+	// The 'id' is the IP address of the pod for k8s if the pod is in the main/default network.
+	// In future it will include the 'network id' for pods in a different network, behind a zvpn gate.
+	// The IP is used because K8S Endpoints object associated with a Service only include the IP.
+	// We use Endpoints to track the membership to a service and readiness.
+	WorkloadUpdate(id string, labels map[string]string, annotations map[string]string)
+
+	// ConfigUpdate is called to notify the XDS server of config updates and request a push.
+	// The requests may be collapsed and throttled.
+	// This replaces the 'cache invalidation' model.
+	ConfigUpdate(full bool)
 }
 
 // ProxyPushStatus represents an event captured during config push to proxies.
@@ -135,6 +174,15 @@ func (ps *PushContext) Add(metric *PushMetric, key string, proxy *Proxy, msg str
 }
 
 var (
+
+	// EndpointNoPod tracks endpoints without an associated pod. This is an error condition, since
+	// we can't figure out the labels. It may be a transient problem, if endpoint is processed before
+	// pod.
+	EndpointNoPod = newPushMetric(
+		"endpoint_no_pod",
+		"Endpoints without an associated pod.",
+	)
+
 	// ProxyStatusNoService represents proxies not selected by any service
 	// This can be normal - for workloads that act only as client, or are not covered by a Service.
 	// It can also be an error, for example in cases the Endpoint list of a service was not updated by the time
@@ -209,6 +257,8 @@ var (
 	// It can be used by debugging tools to inspect the push event. It will be reset after each push with the
 	// new version.
 	LastPushStatus *PushContext
+	// LastPushMutex will protect the LastPushStatus
+	LastPushMutex sync.Mutex
 
 	// All metrics we registered.
 	metrics []*PushMetric
@@ -220,6 +270,7 @@ func NewPushContext() *PushContext {
 	return &PushContext{
 		ServiceByHostname: map[Hostname]*Service{},
 		ProxyStatus:       map[string]map[string]ProxyPushStatus{},
+		ServicePort2Name:  map[string]PortList{},
 		Start:             time.Now(),
 	}
 }
@@ -236,7 +287,9 @@ func (ps *PushContext) JSON() ([]byte, error) {
 
 // OnConfigChange is called when a config change is detected.
 func (ps *PushContext) OnConfigChange() {
+	LastPushMutex.Lock()
 	LastPushStatus = ps
+	LastPushMutex.Unlock()
 	ps.UpdateMetrics()
 }
 
@@ -256,10 +309,21 @@ func (ps *PushContext) UpdateMetrics() {
 	}
 }
 
+// Services returns the list of services that are visible to a Proxy in a given config namespace
+func (ps *PushContext) Services(proxy *Proxy) []*Service {
+	// TODO: use network scopes here, and return services in the proxy namespace if
+	// configured to use current_namespace as the scope and proxy is not nil
+	//if proxy == nil {
+	//	return ps.allServices
+	//}
+	return ps.allServices
+}
+
 // VirtualServices lists all virtual services bound to the specified gateways
 // This replaces store.VirtualServices
-func (ps *PushContext) VirtualServices(gateways map[string]bool) []Config {
-	configs := ps.VirtualServiceConfigs
+func (ps *PushContext) VirtualServices(proxy *Proxy, gateways map[string]bool) []Config {
+	// TODO: use the proxy namespace with NetworkScopes to return the correct set of VirtualServices
+	configs := ps.virtualServiceConfigs
 	out := make([]Config, 0)
 	for _, config := range configs {
 		rule := config.Spec.(*networking.VirtualService)
@@ -286,6 +350,37 @@ func (ps *PushContext) VirtualServices(gateways map[string]bool) []Config {
 	return out
 }
 
+// DestinationRule returns a destination rule for a service name in a given domain.
+func (ps *PushContext) DestinationRule(proxy *Proxy, hostname Hostname) *Config {
+	// TODO: use the proxy namespace to return only public destination rules if in different namespace
+	if c, ok := MostSpecificHostMatch(hostname, ps.destinationRuleHosts); ok {
+		return ps.destinationRuleByHosts[c].config
+	}
+	return nil
+}
+
+// SubsetToLabels returns the labels associated with a subset of a given service.
+func (ps *PushContext) SubsetToLabels(subsetName string, hostname Hostname) LabelsCollection {
+	// empty subset
+	if subsetName == "" {
+		return nil
+	}
+
+	config := ps.DestinationRule(nil, hostname)
+	if config == nil {
+		return nil
+	}
+
+	rule := config.Spec.(*networking.DestinationRule)
+	for _, subset := range rule.Subsets {
+		if subset.Name == subsetName {
+			return []Labels{subset.Labels}
+		}
+	}
+
+	return nil
+}
+
 // InitContext will initialize the data structures used for code generation.
 // This should be called before starting the push, from the thread creating
 // the push context.
@@ -309,6 +404,11 @@ func (ps *PushContext) InitContext(env *Environment) error {
 		return err
 	}
 
+	if err = ps.initAuthorizationPolicies(env); err != nil {
+		rbacLog.Errorf("failed to initialize authorization policies: %v", err)
+		return err
+	}
+
 	// TODO: everything else that is used in config generation - the generation
 	// should not have any deps on config store.
 	ps.initDone = true
@@ -323,9 +423,10 @@ func (ps *PushContext) initServiceRegistry(env *Environment) error {
 		return err
 	}
 	// Sort the services in order of creation.
-	ps.Services = sortServicesByCreationTime(services)
+	ps.allServices = sortServicesByCreationTime(services)
 	for _, s := range services {
 		ps.ServiceByHostname[s.Hostname] = s
+		ps.ServicePort2Name[string(s.Hostname)] = s.Ports
 	}
 	return nil
 }
@@ -346,9 +447,9 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 	}
 
 	sortConfigByCreationTime(vservices)
-	ps.VirtualServiceConfigs = vservices
+	ps.virtualServiceConfigs = vservices
 	// convert all shortnames in virtual services into FQDNs
-	for _, r := range ps.VirtualServiceConfigs {
+	for _, r := range ps.virtualServiceConfigs {
 		rule := r.Spec.(*networking.VirtualService)
 		// resolve top level hosts
 		for i, h := range rule.Hosts {
@@ -468,32 +569,11 @@ func (ps *PushContext) SetDestinationRules(configs []Config) {
 	ps.destinationRuleByHosts = combinedDestinationRuleMap
 }
 
-// DestinationRule returns a destination rule for a service name in a given domain.
-func (ps *PushContext) DestinationRule(hostname Hostname) *Config {
-	if c, ok := MostSpecificHostMatch(hostname, ps.destinationRuleHosts); ok {
-		return ps.destinationRuleByHosts[c].config
+func (ps *PushContext) initAuthorizationPolicies(env *Environment) error {
+	var err error
+	if ps.AuthzPolicies, err = NewAuthzPolicies(env); err != nil {
+		rbacLog.Errorf("failed to initialize authorization policies: %v", err)
+		return err
 	}
-	return nil
-}
-
-// SubsetToLabels returns the labels associated with a subset of a given service.
-func (ps *PushContext) SubsetToLabels(subsetName string, hostname Hostname) LabelsCollection {
-	// empty subset
-	if subsetName == "" {
-		return nil
-	}
-
-	config := ps.DestinationRule(hostname)
-	if config == nil {
-		return nil
-	}
-
-	rule := config.Spec.(*networking.DestinationRule)
-	for _, subset := range rule.Subsets {
-		if subset.Name == subsetName {
-			return []Labels{subset.Labels}
-		}
-	}
-
 	return nil
 }

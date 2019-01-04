@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"go.opencensus.io/stats/view"
@@ -107,6 +108,7 @@ func defaultTestArgs() *Args {
 }
 
 // createClient returns a Mixer gRPC client, useful for tests
+// nolint: interfacer
 func createClient(addr net.Addr) (mixerpb.MixerClient, error) {
 	conn, err := grpc.Dial(addr.String(), grpc.WithInsecure())
 	if err != nil {
@@ -268,7 +270,13 @@ func TestErrors(t *testing.T) {
 		},
 		{"unix socket removal",
 			func(a *Args, pt *patchTable) {
-				a.APIAddress = "unix:///dev/null"
+				a.APIAddress = "unix:///dev"
+			},
+		},
+		{"Unix API address failed",
+			func(a *Args, pt *patchTable) {
+				a.APIAddress = "unix://a/b/c"
+				pt.remove = func(name string) error { return errors.New("BAD") }
 			},
 		},
 	}
@@ -299,11 +307,36 @@ func TestErrors(t *testing.T) {
 			v.setupFn(a, pt)
 			s, err = newServer(a, pt)
 			if s != nil || err == nil {
+				s.Close()
 				t.Errorf("Got success, expecting error")
 			}
 
 			// cleanup
 			configStore.Stop()
+		})
+	}
+}
+
+func TestExtractNetAddress(t *testing.T) {
+	cases := []struct {
+		apiPort       uint16
+		apiAddress    string
+		resultNetwork string
+		resultAddress string
+	}{
+		{0, "tcp://127.0.0.1:0", "tcp", "127.0.0.1:0"},
+		{0, ":0", "tcp", ":0"},
+		{0, "unix://a/b/c", "unix", "a/b/c"},
+		{132, "", "tcp", ":132"},
+	}
+
+	for i, c := range cases {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			n, a := extractNetAddress(c.apiPort, c.apiAddress)
+
+			if n != c.resultNetwork || a != c.resultAddress {
+				t.Errorf("Expecting %s:%s, got %s:%s", c.resultNetwork, c.resultAddress, n, a)
+			}
 		})
 	}
 }

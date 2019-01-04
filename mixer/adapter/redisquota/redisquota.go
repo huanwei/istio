@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -332,7 +332,8 @@ func (h *handler) HandleQuota(context context.Context, instance *quota.Instance,
 					key + ".meta", // KEY[1]
 					key + ".data", // KEY[2]
 				},
-				maxAmount, // ARGV[1] credit
+				// nolint: goimports
+				maxAmount,                               // ARGV[1] credit
 				limit.GetValidDuration().Nanoseconds(),  // ARGV[2] window length
 				limit.GetBucketDuration().Nanoseconds(), // ARGV[3] bucket length
 				args.BestEffort,                         // ARGV[4] best effort

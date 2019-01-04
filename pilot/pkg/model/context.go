@@ -33,6 +33,7 @@ type Environment struct {
 	ServiceDiscovery
 
 	// Accounts interface for listing service accounts
+	// Deprecated - use PushContext.ServiceAccounts
 	ServiceAccounts
 
 	// Config interface for listing routing rules
@@ -52,6 +53,13 @@ type Environment struct {
 	// CONFIG AND PUSH
 	// Deprecated - a local config for ads will be used instead
 	PushContext *PushContext
+
+	// MeshNetworks (loaded from a config map) provides information about the
+	// set of networks inside a mesh and how to route to endpoints in each
+	// network. Each network provides information about the endpoints in a
+	// routable L3 network. A single routable L3 network can have one or more
+	// service registries.
+	MeshNetworks *meshconfig.MeshNetworks
 }
 
 // Proxy defines the proxy attributes used by xDS identification
@@ -72,6 +80,11 @@ type Proxy struct {
 	// Domain defines the DNS domain suffix for short hostnames (e.g.
 	// "default.svc.cluster.local")
 	Domain string
+
+	// ConfigNamespace defines the namespace where this proxy resides
+	// for the purposes of network scoping.
+	// NOTE: DO NOT USE THIS FIELD TO CONSTRUCT DNS NAMES
+	ConfigNamespace string
 
 	// Metadata key-value pairs extending the Node identifier
 	Metadata map[string]string
@@ -113,6 +126,55 @@ func (node *Proxy) ServiceNode() string {
 func (node *Proxy) GetProxyVersion() (string, bool) {
 	version, found := node.Metadata["ISTIO_PROXY_VERSION"]
 	return version, found
+}
+
+// RouterMode decides the behavior of Istio Gateway (normal or sni-dnat)
+type RouterMode string
+
+const (
+	// StandardRouter is the normal gateway mode
+	StandardRouter RouterMode = "standard"
+
+	// SniDnatRouter is used for bridging two networks
+	SniDnatRouter RouterMode = "sni-dnat"
+)
+
+// GetRouterMode returns the operating mode associated with the router.
+// Assumes that the proxy is of type Router
+func (node *Proxy) GetRouterMode() RouterMode {
+	if modestr, found := node.Metadata["ROUTER_MODE"]; found {
+		switch RouterMode(modestr) {
+		case SniDnatRouter:
+			return SniDnatRouter
+		}
+	}
+	return StandardRouter
+}
+
+// UnnamedNetwork is the default network that proxies in the mesh
+// get when they don't request a specific network view.
+const UnnamedNetwork = ""
+
+// GetNetworkView returns the networks that the proxy requested.
+// When sending EDS/CDS-with-dns-endpoints, Pilot will only send
+// endpoints corresponding to the networks that the proxy wants to see.
+// If not set, we assume that the proxy wants to see endpoints from the default
+// unnamed network.
+func GetNetworkView(node *Proxy) map[string]bool {
+	if node == nil {
+		return map[string]bool{UnnamedNetwork: true}
+	}
+
+	nmap := make(map[string]bool)
+	if networks, found := node.Metadata["REQUESTED_NETWORK_VIEW"]; found {
+		for _, n := range strings.Split(networks, ",") {
+			nmap[n] = true
+		}
+	} else {
+		// Proxy sees endpoints from the default unnamed network only
+		nmap[UnnamedNetwork] = true
+	}
+	return nmap
 }
 
 // ParseMetadata parses the opaque Metadata from an Envoy Node into string key-value pairs.
@@ -160,6 +222,30 @@ func ParseServiceNode(s string) (Proxy, error) {
 	out.ID = parts[2]
 	out.Domain = parts[3]
 	return out, nil
+}
+
+// GetProxyConfigNamespace extracts the namespace associated with the proxy
+// from the proxy metadata or the proxy ID
+func GetProxyConfigNamespace(proxy *Proxy) string {
+	if proxy == nil {
+		return ""
+	}
+
+	// First look for ISTIO_META_CONFIG_NAMESPACE
+	if configNamespace, found := proxy.Metadata["CONFIG_NAMESPACE"]; found {
+		return configNamespace
+	}
+
+	// If its not present, fallback to parsing the namespace from the proxyID
+	// NOTE: This is a hack for Kubernetes only where we assume that the
+	// proxy ID is of the form name.namespace. Other platforms should
+	// set ISTIO_META_CONFIG_NAMESPACE in the sidecar bootstrap config.
+	parts := strings.Split(proxy.ID, ".")
+	if len(parts) != 2 {
+		return ""
+	}
+
+	return parts[1]
 }
 
 const (
@@ -214,12 +300,9 @@ func DefaultProxyConfig() meshconfig.ProxyConfig {
 		ConfigPath:             ConfigPathDir,
 		BinaryPath:             BinaryPathFilename,
 		ServiceCluster:         ServiceClusterName,
-		AvailabilityZone:       "", //no service zone by default, i.e. AZ-aware routing is disabled
 		DrainDuration:          types.DurationProto(2 * time.Second),
 		ParentShutdownDuration: types.DurationProto(3 * time.Second),
 		DiscoveryAddress:       DiscoveryPlainAddress,
-		DiscoveryRefreshDelay:  types.DurationProto(1 * time.Second),
-		ZipkinAddress:          "",
 		ConnectTimeout:         types.DurationProto(1 * time.Second),
 		StatsdUdpAddress:       "",
 		ProxyAdminPort:         15000,
@@ -227,6 +310,7 @@ func DefaultProxyConfig() meshconfig.ProxyConfig {
 		CustomConfigFile:       "",
 		Concurrency:            0,
 		StatNameLength:         189,
+		Tracing:                nil,
 	}
 }
 
@@ -234,21 +318,21 @@ func DefaultProxyConfig() meshconfig.ProxyConfig {
 func DefaultMeshConfig() meshconfig.MeshConfig {
 	config := DefaultProxyConfig()
 	return meshconfig.MeshConfig{
-		// TODO(mixeraddress is deprecated. Remove)
-		MixerAddress:          "",
 		MixerCheckServer:      "",
 		MixerReportServer:     "",
 		DisablePolicyChecks:   false,
+		PolicyCheckFailOpen:   false,
 		ProxyListenPort:       15001,
 		ConnectTimeout:        types.DurationProto(1 * time.Second),
 		IngressClass:          "istio",
 		IngressControllerMode: meshconfig.MeshConfig_STRICT,
-		RdsRefreshDelay:       types.DurationProto(1 * time.Second),
 		EnableTracing:         true,
 		AccessLogFile:         "/dev/stdout",
+		AccessLogEncoding:     meshconfig.MeshConfig_TEXT,
 		DefaultConfig:         &config,
 		SdsUdsPath:            "",
-		SdsRefreshDelay:       types.DurationProto(15 * time.Second),
+		EnableSdsTokenMount:   false,
+		TrustDomain:           "",
 	}
 }
 
@@ -256,7 +340,7 @@ func DefaultMeshConfig() meshconfig.MeshConfig {
 // input YAML with defaults applied to omitted configuration values.
 func ApplyMeshConfigDefaults(yaml string) (*meshconfig.MeshConfig, error) {
 	out := DefaultMeshConfig()
-	if err := ApplyYAML(yaml, &out); err != nil {
+	if err := ApplyYAML(yaml, &out, false); err != nil {
 		return nil, multierror.Prefix(err, "failed to convert to proto.")
 	}
 
@@ -273,22 +357,37 @@ func ApplyMeshConfigDefaults(yaml string) (*meshconfig.MeshConfig, error) {
 		if err != nil {
 			return nil, multierror.Prefix(err, "failed to re-encode default proxy config")
 		}
-		if err := ApplyYAML(origProxyConfigYAML, out.DefaultConfig); err != nil {
+		if err := ApplyYAML(origProxyConfigYAML, out.DefaultConfig, false); err != nil {
 			return nil, multierror.Prefix(err, "failed to convert to proto.")
 		}
-	}
-
-	// Backward compat option: if mixer address is set but
-	// mixer_check_server and mixer_report_server are unset, copy the value
-	// into these two config vars.
-	if out.MixerAddress != "" && out.MixerCheckServer == "" && out.MixerReportServer == "" {
-		out.MixerCheckServer = out.MixerAddress
-		out.MixerReportServer = out.MixerAddress
 	}
 
 	if err := ValidateMeshConfig(&out); err != nil {
 		return nil, err
 	}
+
+	return &out, nil
+}
+
+// EmptyMeshNetworks configuration with no networks
+func EmptyMeshNetworks() meshconfig.MeshNetworks {
+	return meshconfig.MeshNetworks{
+		Networks: map[string]*meshconfig.Network{},
+	}
+}
+
+// LoadMeshNetworksConfig returns a new MeshNetworks decoded from the
+// input YAML.
+func LoadMeshNetworksConfig(yaml string) (*meshconfig.MeshNetworks, error) {
+	out := EmptyMeshNetworks()
+	if err := ApplyYAML(yaml, &out, false); err != nil {
+		return nil, multierror.Prefix(err, "failed to convert to proto.")
+	}
+
+	// TODO validate the loaded MeshNetworks
+	// if err := ValidateMeshNetworks(&out); err != nil {
+	// 	return nil, err
+	// }
 	return &out, nil
 }
 

@@ -15,43 +15,113 @@
 package pilot
 
 import (
+	"fmt"
+	"istio.io/istio/pkg/test/framework"
+	"istio.io/istio/pkg/test/framework/api/components"
+	"istio.io/istio/pkg/test/framework/api/context"
+	"istio.io/istio/pkg/test/framework/api/descriptors"
+	"istio.io/istio/pkg/test/framework/api/ids"
+	"istio.io/istio/pkg/test/framework/api/lifecycle"
 	"testing"
 
-	"fmt"
-
 	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pkg/test/framework"
-	"istio.io/istio/pkg/test/framework/dependency"
-	"istio.io/istio/pkg/test/framework/environment"
+	"istio.io/istio/pkg/test"
+)
+
+var (
+	reportTemplate = `
+apiVersion: "config.istio.io/v1alpha2"
+kind: metric
+metadata:
+  name: metric1
+  namespace: {{.TestNamespace}}
+spec:
+  value: "2"
+  dimensions:
+    requestId: request.headers["x-request-id"]
+    host: request.host
+    protocol: context.protocol
+    responseCode: response.code
+---
+apiVersion: "config.istio.io/v1alpha2"
+kind: rule
+metadata:
+  name: rule1
+  namespace: {{.TestNamespace}}
+spec:
+  actions:
+  - handler: handler1.bypass
+    instances:
+    - metric1.metric
+`
 )
 
 func TestHTTP(t *testing.T) {
-	framework.Requires(t, dependency.Apps)
+	ctx := framework.GetContext(t)
+	ctx.RequireOrSkip(t, lifecycle.Test, &ids.Apps)
+	testHTTP(t, ctx)
+}
 
-	env := framework.AcquireEnvironment(t)
-	env.Configure(t, "")
+func TestHTTPKubernetes(t *testing.T) {
+	ctx := framework.GetContext(t)
+	ctx.RequireOrSkip(t, lifecycle.Test, &descriptors.KubernetesEnvironment, &ids.Apps)
 
-	a := env.GetAppOrFail("a", t)
-	b := env.GetAppOrFail("b", t)
-	c := env.GetAppOrFail("c", t)
+	testHTTP(t, ctx)
+}
 
-	// Send requests to all of the HTTP endpoints.
-	apps := []environment.DeployedApp{a, b, c}
-	for _, src := range apps {
-		for _, target := range apps {
-			if src != target {
-				endpoints := target.EndpointsForProtocol(model.ProtocolHTTP)
-				for _, endpoint := range endpoints {
-					testName := fmt.Sprintf("%s_%s[%s]", src.Name(), target.Name(), endpoint.Name())
-					t.Run(testName, func(t *testing.T) {
-						results := src.CallOrFail(endpoint, environment.AppCallOptions{}, t)
-						if !results[0].IsOK() {
-							t.Fatalf("HTTP Request unsuccessful: %s", results[0].Body)
-						}
-					})
-				}
-			}
-		}
+func TestHTTPNative(t *testing.T) {
+	ctx := framework.GetContext(t)
+
+	// TODO(nmittler): When k8s deployment is supported for apps, enable policy checking for both local and k8s.
+	ctx.RequireOrSkip(t, lifecycle.Test, &descriptors.NativeEnvironment, &ids.Apps, &ids.PolicyBackend, &ids.Mixer)
+
+	apps := components.GetApps(ctx, t)
+	a := apps.GetAppOrFail("a", t)
+	b := apps.GetAppOrFail("b", t)
+	mixer := components.GetMixer(ctx, t)
+	policy := components.GetPolicyBackend(ctx, t)
+
+	mixer.Configure(t,
+		lifecycle.Test,
+		test.JoinConfigs(
+			ctx.Evaluate(t, reportTemplate),
+			policy.CreateConfigSnippet("handler1"),
+		))
+
+	be := b.EndpointsForProtocol(model.ProtocolHTTP)[0]
+	result := a.CallOrFail(be, components.AppCallOptions{}, t)[0]
+
+	if !result.IsOK() {
+		t.Fatalf("HTTP Request unsuccessful: %s", result.Body)
+	}
+
+	expected := ctx.Evaluate(t, fmt.Sprintf(`
+{
+  "name":"metric1.metric.{{.TestNamespace}}",
+  "value":{"int64Value":"2"},
+  "dimensions":{
+    "requestId":{"stringValue":"%s"},
+    "host":{"stringValue":"b"},
+    "protocol":{"stringValue":"http"},
+    "responseCode":{"int64Value":"200"}
+   }
+}`, result.ID))
+
+	policy.ExpectReportJSON(t, expected)
+}
+
+func testHTTP(t *testing.T, ctx context.Instance) {
+	t.Helper()
+
+	apps := components.GetApps(ctx, t)
+	a := apps.GetAppOrFail("a", t)
+	b := apps.GetAppOrFail("b", t)
+
+	be := b.EndpointsForProtocol(model.ProtocolHTTP)[0]
+	result := a.CallOrFail(be, components.AppCallOptions{}, t)[0]
+
+	if !result.IsOK() {
+		t.Fatalf("HTTP Request unsuccessful: %s", result.Body)
 	}
 }
 

@@ -195,6 +195,9 @@ func TestParseProtocol(t *testing.T) {
 		{"https", ProtocolHTTPS},
 		{"http2", ProtocolHTTP2},
 		{"grpc", ProtocolGRPC},
+		{"grpc-web", ProtocolGRPCWeb},
+		{"gRPC-Web", ProtocolGRPCWeb},
+		{"grpc-Web", ProtocolGRPCWeb},
 		{"udp", ProtocolUDP},
 		{"Mongo", ProtocolMongo},
 		{"mongo", ProtocolMongo},
@@ -345,5 +348,36 @@ func BenchmarkSort(b *testing.B) {
 		given := make(Hostnames, len(unsorted))
 		copy(given, unsorted)
 		sort.Sort(given)
+	}
+}
+
+func TestIsValidSubsetKey(t *testing.T) {
+	cases := []struct {
+		subsetkey string
+		expectErr bool
+	}{
+		{
+			subsetkey: "outbound|80|subset|hostname",
+			expectErr: false,
+		},
+		{
+			subsetkey: "outbound|80||hostname",
+			expectErr: false,
+		},
+		{
+			subsetkey: "outbound|80|subset||hostname",
+			expectErr: true,
+		},
+		{
+			subsetkey: "",
+			expectErr: true,
+		},
+	}
+
+	for _, c := range cases {
+		err := IsValidSubsetKey(c.subsetkey)
+		if !err != c.expectErr {
+			t.Errorf("got %v but want %v\n", err, c.expectErr)
+		}
 	}
 }

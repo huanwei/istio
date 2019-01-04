@@ -49,7 +49,7 @@ const (
 // ModelProtocolToListenerProtocol converts from a model.Protocol to its corresponding plugin.ListenerProtocol
 func ModelProtocolToListenerProtocol(protocol model.Protocol) ListenerProtocol {
 	switch protocol {
-	case model.ProtocolHTTP, model.ProtocolHTTP2, model.ProtocolGRPC:
+	case model.ProtocolHTTP, model.ProtocolHTTP2, model.ProtocolGRPC, model.ProtocolGRPCWeb:
 		return ListenerProtocolHTTP
 	case model.ProtocolTCP, model.ProtocolHTTPS, model.ProtocolTLS,
 		model.ProtocolMongo, model.ProtocolRedis:
@@ -80,7 +80,8 @@ type InputParams struct {
 	// For outbound/inbound sidecars this is the service port (not endpoint port)
 	// For inbound listener on gateway, this is the gateway server port
 	Port *model.Port
-
+	// The subset associated with the service for which the cluster is being programmed
+	Subset string
 	// Push holds stats and other information about the current push.
 	Push *model.PushContext
 }
@@ -125,14 +126,13 @@ type Plugin interface {
 	OnInboundListener(in *InputParams, mutable *MutableObjects) error
 
 	// OnOutboundCluster is called whenever a new cluster is added to the CDS output.
-	// This is called once per push cycle, and not for every sidecar/gateway
-	OnOutboundCluster(env *model.Environment, push *model.PushContext, service *model.Service, servicePort *model.Port,
-		cluster *xdsapi.Cluster)
+	// This is called once per push cycle, and not for every sidecar/gateway, except for gateways with non-standard
+	// operating modes.
+	OnOutboundCluster(in *InputParams, cluster *xdsapi.Cluster)
 
 	// OnInboundCluster is called whenever a new cluster is added to the CDS output.
 	// Called for each sidecar
-	OnInboundCluster(env *model.Environment, node *model.Proxy, push *model.PushContext, service *model.Service, servicePort *model.Port,
-		cluster *xdsapi.Cluster)
+	OnInboundCluster(in *InputParams, cluster *xdsapi.Cluster)
 
 	// OnOutboundRouteConfiguration is called whenever a new set of virtual hosts (a set of virtual hosts with routes) is
 	// added to RDS in the outbound path.

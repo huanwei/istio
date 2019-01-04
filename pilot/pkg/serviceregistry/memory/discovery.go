@@ -17,7 +17,6 @@ package memory
 import (
 	"fmt"
 	"net"
-
 	"time"
 
 	"istio.io/istio/pilot/pkg/model"
@@ -69,12 +68,12 @@ func MakeService(hostname model.Hostname, address string) *model.Service {
 }
 
 // MakeExternalHTTPService creates memory external service
-func MakeExternalHTTPService(hostname, external model.Hostname, address string) *model.Service {
+func MakeExternalHTTPService(hostname model.Hostname, isMeshExternal bool, address string) *model.Service {
 	return &model.Service{
 		CreationTime: time.Now(),
 		Hostname:     hostname,
 		Address:      address,
-		ExternalName: external,
+		MeshExternal: isMeshExternal,
 		Ports: []*model.Port{{
 			Name:     "http",
 			Port:     80,
@@ -84,12 +83,12 @@ func MakeExternalHTTPService(hostname, external model.Hostname, address string) 
 }
 
 // MakeExternalHTTPSService creates memory external service
-func MakeExternalHTTPSService(hostname, external model.Hostname, address string) *model.Service {
+func MakeExternalHTTPSService(hostname model.Hostname, isMeshExternal bool, address string) *model.Service {
 	return &model.Service{
 		CreationTime: time.Now(),
 		Hostname:     hostname,
 		Address:      address,
-		ExternalName: external,
+		MeshExternal: isMeshExternal,
 		Ports: []*model.Port{{
 			Name:     "https",
 			Port:     443,
@@ -115,10 +114,10 @@ func MakeInstance(service *model.Service, port *model.Port, version int, az stri
 			Address:     MakeIP(service, version),
 			Port:        target,
 			ServicePort: port,
+			Locality:    az,
 		},
-		Service:          service,
-		Labels:           map[string]string{"version": fmt.Sprintf("v%d", version)},
-		AvailabilityZone: az,
+		Service: service,
+		Labels:  map[string]string{"version": fmt.Sprintf("v%d", version)},
 	}
 }
 

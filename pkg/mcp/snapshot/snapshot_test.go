@@ -126,8 +126,6 @@ var (
 		Cluster: "test-cluster",
 	}
 
-	key = node.Id
-
 	fakeEnvelope0 *mcp.Envelope
 	fakeEnvelope1 *mcp.Envelope
 	fakeEnvelope2 *mcp.Envelope
@@ -155,19 +153,31 @@ func createTestWatch(c *Cache, typeURL, version string, responseC chan *server.W
 		TypeUrl:     typeURL,
 		VersionInfo: version,
 		Client: &mcp.Client{
-			Id: key,
+			Id: DefaultGroup,
 		},
 	}
-	got, cancel := c.Watch(req, responseC)
+
+	cancel := c.Watch(req, func(response *server.WatchResponse) {
+		responseC <- response
+	})
+
 	if wantResponse {
-		if got == nil {
+		select {
+		case got := <-responseC:
+			return got, nil, nil
+		default:
 			return nil, nil, errors.New("wanted response, got none")
 		}
 	} else {
-		if got != nil {
-			return nil, nil, fmt.Errorf("wanted no response, got %v", got)
+		select {
+		case got := <-responseC:
+			if got != nil {
+				return nil, nil, fmt.Errorf("wanted no response, got %v", got)
+			}
+		default:
 		}
 	}
+
 	if wantCancel {
 		if cancel == nil {
 			return nil, nil, errors.New("wanted cancel() function, got none")
@@ -177,7 +187,8 @@ func createTestWatch(c *Cache, typeURL, version string, responseC chan *server.W
 			return nil, nil, fmt.Errorf("wanted no cancel() function, got %v", cancel)
 		}
 	}
-	return got, cancel, nil
+
+	return nil, cancel, nil
 }
 
 func getAsyncResponse(responseC chan *server.WatchResponse) (*server.WatchResponse, bool) {
@@ -197,8 +208,8 @@ func TestCreateWatch(t *testing.T) {
 	initVersion := nextStrVersion(&versionInt)
 	snapshot := makeSnapshot(initVersion)
 
-	c := New()
-	c.SetSnapshot(key, snapshot)
+	c := New(DefaultGroupIndex)
+	c.SetSnapshot(DefaultGroup, snapshot)
 
 	// verify immediate and async responses are handled independently across types.
 	for _, typeURL := range WatchResponseTypes {
@@ -223,7 +234,7 @@ func TestCreateWatch(t *testing.T) {
 			snapshot = snapshot.copy()
 			typeVersion = nextStrVersion(&versionInt)
 			snapshot.versions[typeURL] = typeVersion
-			c.SetSnapshot(key, snapshot)
+			c.SetSnapshot(DefaultGroup, snapshot)
 
 			if gotResponse, _ := getAsyncResponse(responseC); gotResponse != nil {
 				wantResponse := &server.WatchResponse{
@@ -255,8 +266,8 @@ func TestWatchCancel(t *testing.T) {
 	initVersion := nextStrVersion(&versionInt)
 	snapshot := makeSnapshot(initVersion)
 
-	c := New()
-	c.SetSnapshot(key, snapshot)
+	c := New(DefaultGroupIndex)
+	c.SetSnapshot(DefaultGroup, snapshot)
 
 	for _, typeURL := range WatchResponseTypes {
 		t.Run(typeURL, func(t *testing.T) {
@@ -279,7 +290,7 @@ func TestWatchCancel(t *testing.T) {
 			snapshot = snapshot.copy()
 			typeVersion = nextStrVersion(&versionInt)
 			snapshot.versions[typeURL] = typeVersion
-			c.SetSnapshot(key, snapshot)
+			c.SetSnapshot(DefaultGroup, snapshot)
 
 			if gotResponse, _ := getAsyncResponse(responseC); gotResponse != nil {
 				t.Fatalf("open watch failed: received premature response: %v", gotResponse)
@@ -293,15 +304,15 @@ func TestClearSnapshot(t *testing.T) {
 	initVersion := nextStrVersion(&versionInt)
 	snapshot := makeSnapshot(initVersion)
 
-	c := New()
-	c.SetSnapshot(key, snapshot)
+	c := New(DefaultGroupIndex)
+	c.SetSnapshot(DefaultGroup, snapshot)
 
 	for _, typeURL := range WatchResponseTypes {
 		t.Run(typeURL, func(t *testing.T) {
 			responseC := make(chan *server.WatchResponse, 1)
 
 			// verify no immediate response if snapshot is cleared.
-			c.ClearSnapshot(key)
+			c.ClearSnapshot(DefaultGroup)
 			if _, _, err := createTestWatch(c, typeURL, "", responseC, false, true); err != nil {
 				t.Fatalf("CreateWatch() failed: %v", err)
 			}
@@ -310,7 +321,7 @@ func TestClearSnapshot(t *testing.T) {
 			snapshot = snapshot.copy()
 			typeVersion := nextStrVersion(&versionInt)
 			snapshot.versions[typeURL] = typeVersion
-			c.SetSnapshot(key, snapshot)
+			c.SetSnapshot(DefaultGroup, snapshot)
 
 			if gotResponse, _ := getAsyncResponse(responseC); gotResponse != nil {
 				wantResponse := &server.WatchResponse{
@@ -333,7 +344,7 @@ func TestClearStatus(t *testing.T) {
 	initVersion := nextStrVersion(&versionInt)
 	snapshot := makeSnapshot(initVersion)
 
-	c := New()
+	c := New(DefaultGroupIndex)
 
 	for _, typeURL := range WatchResponseTypes {
 		t.Run(typeURL, func(t *testing.T) {
@@ -343,18 +354,18 @@ func TestClearStatus(t *testing.T) {
 				t.Fatalf("CreateWatch() failed: %v", err)
 			}
 
-			if status := c.Status(key); status == nil {
+			if status := c.Status(DefaultGroup); status == nil {
 				t.Fatal("no status found")
 			}
 
-			c.ClearStatus(key)
+			c.ClearStatus(DefaultGroup)
 
 			// verify that ClearStatus() cancels the open watch and
 			// that any subsequent snapshot is not delivered.
 			snapshot = snapshot.copy()
 			typeVersion := nextStrVersion(&versionInt)
 			snapshot.versions[typeURL] = typeVersion
-			c.SetSnapshot(key, snapshot)
+			c.SetSnapshot(DefaultGroup, snapshot)
 
 			if gotResponse, timeout := getAsyncResponse(responseC); gotResponse != nil {
 				t.Fatalf("open watch failed: received unexpected response: %v", gotResponse)
@@ -362,7 +373,7 @@ func TestClearStatus(t *testing.T) {
 				t.Fatal("open watch was not canceled on ClearStatus()")
 			}
 
-			c.ClearSnapshot(key)
+			c.ClearSnapshot(DefaultGroup)
 		})
 	}
 }
